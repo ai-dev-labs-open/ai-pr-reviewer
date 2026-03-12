@@ -10,7 +10,8 @@ export type SkippedFileReason =
   | "binary_or_missing_patch"
   | "unsupported_status"
   | "file_limit"
-  | "patch_too_large";
+  | "patch_too_large"
+  | "generated_or_lockfile";
 
 export interface ReviewerConfig {
   provider: ProviderName;

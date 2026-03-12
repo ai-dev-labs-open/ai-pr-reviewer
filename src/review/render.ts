@@ -79,6 +79,8 @@ function formatSkippedReason(reason: string): string {
       return "skipped because the max file limit was reached";
     case "patch_too_large":
       return "patch exceeded the configured max patch size";
+    case "generated_or_lockfile":
+      return "skipped: generated file or lockfile";
     default:
       return "skipped";
   }

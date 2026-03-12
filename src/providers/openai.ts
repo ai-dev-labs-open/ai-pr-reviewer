@@ -1,4 +1,5 @@
 import { ProviderError } from "../errors";
+import { fetchWithRetry } from "../network";
 import type { ProviderReviewRequest, ProviderReviewResponse } from "../types";
 import type { ReviewProvider } from "./interface";
 
@@ -26,30 +27,34 @@ export class OpenAiProvider implements ReviewProvider {
   ) {}
 
   async review(request: ProviderReviewRequest): Promise<ProviderReviewResponse> {
-    const response = await this.fetchImpl("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.apiKey}`
-      },
-      body: JSON.stringify({
-        model: request.model,
-        temperature: 0.1,
-        response_format: {
-          type: "json_object"
+    const response = await fetchWithRetry(
+      this.fetchImpl,
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.apiKey}`
         },
-        messages: [
-          {
-            role: "system",
-            content: request.systemPrompt
+        body: JSON.stringify({
+          model: request.model,
+          temperature: 0.1,
+          response_format: {
+            type: "json_object"
           },
-          {
-            role: "user",
-            content: request.userPrompt
-          }
-        ]
-      })
-    });
+          messages: [
+            {
+              role: "system",
+              content: request.systemPrompt
+            },
+            {
+              role: "user",
+              content: request.userPrompt
+            }
+          ]
+        })
+      }
+    );
 
     const responseJson = (await response.json()) as OpenAiChatResponse;
 

@@ -1,4 +1,8 @@
-import { SUPPORTED_FILE_STATUSES } from "../constants";
+import {
+  SKIPPED_EXACT_FILENAMES,
+  SKIPPED_FILE_PATTERNS,
+  SUPPORTED_FILE_STATUSES
+} from "../constants";
 import type {
   GitHubPullRequestFile,
   ReviewChunk,
@@ -10,6 +14,19 @@ export interface PreparedReviewInput {
   reviewableFiles: ReviewableFile[];
   chunks: ReviewChunk[];
   skippedFiles: SkippedFile[];
+}
+
+/**
+ * Returns true if the file path matches a known lockfile name or generated-file pattern.
+ */
+export function isGeneratedOrLockfile(filename: string): boolean {
+  const basename = filename.split("/").pop() ?? filename;
+
+  if (SKIPPED_EXACT_FILENAMES.has(basename)) {
+    return true;
+  }
+
+  return SKIPPED_FILE_PATTERNS.some((pattern) => pattern.test(filename));
 }
 
 export function prepareReviewInput(
@@ -25,6 +42,14 @@ export function prepareReviewInput(
       skippedFiles.push({
         file: file.filename,
         reason: "unsupported_status"
+      });
+      continue;
+    }
+
+    if (isGeneratedOrLockfile(file.filename)) {
+      skippedFiles.push({
+        file: file.filename,
+        reason: "generated_or_lockfile"
       });
       continue;
     }
