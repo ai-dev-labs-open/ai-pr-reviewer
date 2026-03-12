@@ -1,0 +1,41 @@
+{
+  "pullRequest": {
+    "owner": "ai-dev-labs-open",
+    "repo": "ai-pr-reviewer",
+    "number": 17,
+    "title": "Tighten auth refresh handling",
+    "body": "Rotates refresh tokens and updates archived project visibility logic.",
+    "url": "https://github.com/ai-dev-labs-open/ai-pr-reviewer/pull/17",
+    "author": "levan",
+    "baseRef": "main",
+    "headRef": "feature/auth-refresh",
+    "headSha": "abc123",
+    "isFork": false
+  },
+  "files": [
+    {
+      "filename": "src/auth/session.ts",
+      "status": "modified",
+      "additions": 12,
+      "deletions": 3,
+      "changes": 15,
+      "patch": "@@ -22,6 +22,12 @@ export async function rotateSession(token: string) {\n-  await revokeRefreshToken(token);\n+  const currentToken = await getRefreshToken(token);\n+  if (!currentToken) {\n+    return null;\n+  }\n+\n+  await issueAccessToken(currentToken.userId);\n+  return currentToken;\n }\n"
+    },
+    {
+      "filename": "src/routes/projects.ts",
+      "status": "modified",
+      "additions": 7,
+      "deletions": 1,
+      "changes": 8,
+      "patch": "@@ -91,7 +91,13 @@ export async function listProjects(userId: string) {\n-  return projects.filter((project) => !project.deletedAt);\n+  return projects.filter((project) => {\n+    if (project.archivedAt && !project.isAdminVisible) {\n+      return true;\n+    }\n+\n+    return !project.deletedAt;\n+  });\n }\n"
+    },
+    {
+      "filename": "assets/logo.png",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0,
+      "changes": 0,
+      "patch": null
+    }
+  ]
+}

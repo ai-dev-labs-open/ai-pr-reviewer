@@ -1,0 +1,45 @@
+name: AI PR Reviewer
+description: Review pull request diffs with Anthropic or OpenAI and post a sticky summary comment.
+author: ai-dev-labs-open
+branding:
+  color: gray-dark
+  icon: search
+inputs:
+  provider:
+    description: Provider name. Supported values are anthropic and openai.
+    required: true
+    default: anthropic
+  model:
+    description: Provider model identifier to call for the review.
+    required: true
+  provider-api-key:
+    description: API key for the selected provider.
+    required: true
+  github-token:
+    description: GitHub token used to read pull request metadata and write the sticky comment.
+    required: true
+  max-files:
+    description: Maximum number of changed files to review.
+    required: false
+    default: "20"
+  max-patch-chars:
+    description: Maximum number of diff characters per review chunk and per file.
+    required: false
+    default: "12000"
+  fail-on-severity:
+    description: Fail the action when the highest finding meets or exceeds this severity. Supported values are none, low, medium, high, critical.
+    required: false
+    default: none
+  review-instructions:
+    description: Optional extra review instructions appended to the system prompt.
+    required: false
+outputs:
+  finding-count:
+    description: Total number of normalized findings in the sticky review comment.
+  highest-severity:
+    description: Highest severity found in the review. none when no findings are emitted.
+  status:
+    description: passed, failed, or errored.
+runs:
+  using: node20
+  main: dist/index.js
