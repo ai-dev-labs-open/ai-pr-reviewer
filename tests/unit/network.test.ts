@@ -28,7 +28,7 @@ describe("fetchWithTimeout", () => {
 
     const fetchMock = vi.fn((_input: unknown, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
-        const signal = (init as RequestInit | undefined)?.signal;
+        const signal = (init as RequestInit).signal;
 
         if (signal) {
           signal.addEventListener("abort", () => {
