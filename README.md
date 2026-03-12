@@ -1,6 +1,6 @@
 # AI PR Reviewer
 
-`ai-pr-reviewer` is a secure GitHub Action for reviewing pull request diffs with Anthropic or OpenAI and posting one sticky summary comment back to the PR.
+`ai-pr-reviewer` is a secure GitHub Action that reviews pull request diffs with Anthropic or OpenAI and posts one sticky summary comment back to the PR.
 
 It is built for public repositories, forked pull requests, and automated review workflows where running untrusted PR code is not acceptable. The action never checks out or executes the pull request branch. It only reads pull request metadata and changed-file patches through the GitHub API.
 
@@ -13,15 +13,19 @@ It is built for public repositories, forked pull requests, and automated review 
 
 ## Features
 
-- GitHub Action designed around `pull_request_target`
+- GitHub Action designed around `pull_request_target` for safe forked-PR review
 - Anthropic and OpenAI provider adapters behind one interface
+- Automatic skipping of generated files, minified assets, and lockfiles
 - Diff filtering, chunking, normalization, deduplication, and severity ranking
 - Sticky PR summary comment with outputs for downstream workflow gating
+- Network timeouts and bounded retries on all outbound requests
 - Local dry-run mode for reviewing saved fixtures without GitHub events
 
 ## Quick Start
 
-Create `.github/workflows/ai-pr-reviewer.yml` in the repository that wants reviews:
+### 1. Add the workflow
+
+Create `.github/workflows/ai-pr-reviewer.yml` in the repository you want to review:
 
 ```yaml
 name: AI PR Review
@@ -44,29 +48,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Review PR
-        uses: ai-dev-labs-open/ai-pr-reviewer@main
+        uses: ai-dev-labs-open/ai-pr-reviewer@v1
         with:
           provider: anthropic
-          model: your-model-id
+          model: claude-sonnet-4-6
           provider-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          max-files: 20
-          max-patch-chars: 12000
-          fail-on-severity: high
+```
+
+### 2. Add a provider secret
+
+Go to **Settings → Secrets and variables → Actions** and add the secret that matches your chosen provider:
+
+| Provider | Secret name | Where to get it |
+| --- | --- | --- |
+| Anthropic | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/) |
+| OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/) |
+
+### 3. Use with OpenAI instead
+
+```yaml
+        with:
+          provider: openai
+          model: gpt-4o
+          provider-api-key: ${{ secrets.OPENAI_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## Inputs
 
-| Input | Required | Description |
-| --- | --- | --- |
-| `provider` | Yes | `anthropic` or `openai`. |
-| `model` | Yes | Provider model identifier. |
-| `provider-api-key` | Yes | Provider API key. |
-| `github-token` | Yes | Token used to fetch PR files and write the sticky comment. |
-| `max-files` | No | Max number of changed files to review. Default: `20`. |
-| `max-patch-chars` | No | Max diff characters per file and per chunk. Default: `12000`. |
-| `fail-on-severity` | No | Fail threshold: `none`, `low`, `medium`, `high`, `critical`. |
-| `review-instructions` | No | Extra instructions appended to the review prompt. |
+| Input | Required | Default | Description |
+| --- | --- | --- | --- |
+| `provider` | Yes | `anthropic` | `anthropic` or `openai`. |
+| `model` | Yes | — | Provider model identifier (e.g. `claude-sonnet-4-6`, `gpt-4o`). |
+| `provider-api-key` | Yes | — | API key for the selected provider. |
+| `github-token` | Yes | — | Token used to fetch PR files and write the sticky comment. |
+| `max-files` | No | `20` | Max number of changed files to review. |
+| `max-patch-chars` | No | `12000` | Max diff characters per file and per review chunk. |
+| `fail-on-severity` | No | `none` | Fail the action when the highest finding meets or exceeds this severity: `none`, `low`, `medium`, `high`, `critical`. |
+| `review-instructions` | No | — | Extra instructions appended to the system prompt. |
 
 ## Outputs
 
@@ -76,12 +96,41 @@ jobs:
 | `highest-severity` | Highest finding severity or `none`. |
 | `status` | `passed`, `failed`, or `errored`. |
 
+### Gating a merge on review results
+
+```yaml
+      - name: Review PR
+        id: review
+        uses: ai-dev-labs-open/ai-pr-reviewer@v1
+        with:
+          provider: anthropic
+          model: claude-sonnet-4-6
+          provider-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-severity: high
+
+      - name: Block on high severity
+        if: steps.review.outputs.status == 'failed'
+        run: exit 1
+```
+
 ## Supported Providers
 
-- Anthropic via the Messages API
-- OpenAI via the Chat Completions API
+### Anthropic
 
-Each provider uses the same review pipeline and result schema:
+Pass any Claude model ID as `model`. The action calls the Anthropic Messages API and reads the first `text` block from the response.
+
+Recommended models: `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5-20251001`.
+
+### OpenAI
+
+Pass any Chat Completions model ID as `model`. The action calls the OpenAI Chat Completions API with `response_format: json_object`.
+
+Recommended models: `gpt-4o`, `gpt-4o-mini`, `o3-mini`.
+
+### Finding schema
+
+Each provider returns findings in the same normalized shape:
 
 ```json
 {
@@ -103,12 +152,24 @@ Each provider uses the same review pipeline and result schema:
 
 This keeps forked PR reviews safe while still allowing the action to post a sticky summary comment.
 
+## Files Skipped by Default
+
+The action automatically skips:
+
+- **Lockfiles**: `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Gemfile.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`, `composer.lock`, and others.
+- **Generated files**: `.min.js`, `.min.css`, bundled and vendor assets, `dist/` build artifacts, protobuf-generated files, `.generated.ts` / `.g.cs`, `__generated__/` directories, `.snap` snapshot files, and similar patterns.
+- **Binary or missing patches**: files with no diff text (images, blobs).
+- **Files past the limit**: files beyond `max-files`.
+- **Oversized patches**: individual patches larger than `max-patch-chars`.
+
+All skipped files appear in the sticky comment with a brief reason.
+
 ## Local Dry Run
 
 Use a saved fixture to inspect prompts, normalization, and rendering without GitHub events:
 
 ```bash
-pnpm dry-run --fixture tests/fixtures/sample-pr.json --provider anthropic --model your-model-id
+pnpm dry-run --fixture tests/fixtures/sample-pr.json --provider anthropic --model claude-sonnet-4-6
 ```
 
 Set `PROVIDER_API_KEY` in the environment when running a real provider call locally.
@@ -140,3 +201,26 @@ pnpm build:action
 ```
 
 The `build:action` script uses `@vercel/ncc` to produce the `dist/` artifact consumed by `action.yml`.
+
+## Releasing
+
+This repository follows the standard GitHub Action release pattern where `dist/` is committed to the repository so consumers can reference the action at a tag without running a build step.
+
+### Creating a release
+
+1. Ensure the branch is clean and all checks pass.
+2. Push a version tag:
+   ```bash
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+3. The [release workflow](.github/workflows/release.yml) will:
+   - Run lint, tests, typecheck, and `build:action`.
+   - Commit the freshly built `dist/` back to the tag.
+   - Create a GitHub Release with auto-generated notes.
+
+### Keeping `dist/` in the repository
+
+`dist/` is intentionally committed so that `uses: ai-dev-labs-open/ai-pr-reviewer@v1` works without any build step. The release workflow rebuilds `dist/` deterministically from the tagged source, so the committed artifact always matches the tag.
+
+Local builds should not be committed directly to `main`; they are only committed as part of a release.

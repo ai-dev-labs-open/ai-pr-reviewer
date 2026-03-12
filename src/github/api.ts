@@ -1,4 +1,5 @@
 import { GitHubApiError } from "../errors";
+import { fetchWithRetry } from "../network";
 import type { GitHubIssueComment, GitHubPullRequestFile } from "../types";
 
 export class GitHubClient {
@@ -67,16 +68,20 @@ export class GitHubClient {
     method = "GET",
     body?: unknown
   ): Promise<T> {
-    const response = await this.fetchImpl(`${this.apiBaseUrl}${path}`, {
-      method,
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${this.token}`,
-        "content-type": "application/json",
-        "user-agent": "ai-pr-reviewer"
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
+    const response = await fetchWithRetry(
+      this.fetchImpl,
+      `${this.apiBaseUrl}${path}`,
+      {
+        method,
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Bearer ${this.token}`,
+          "content-type": "application/json",
+          "user-agent": "ai-pr-reviewer"
+        },
+        body: body ? JSON.stringify(body) : undefined
+      }
+    );
 
     if (!response.ok) {
       const text = await response.text();

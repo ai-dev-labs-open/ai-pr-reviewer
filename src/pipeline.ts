@@ -43,7 +43,8 @@ export async function runReviewPipeline(
     const prompt = buildReviewPrompt(
       input.pullRequest,
       chunk,
-      input.config.reviewInstructions
+      input.config.reviewInstructions,
+      prepared.chunks.length
     );
     const providerResponse = await input.provider.review({
       model: input.config.model,

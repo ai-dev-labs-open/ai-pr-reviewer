@@ -75,9 +75,56 @@ function readPositiveInteger(value, inputName, defaultValue) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.SUPPORTED_FILE_STATUSES = exports.STICKY_COMMENT_MARKER = void 0;
+exports.SKIPPED_FILE_PATTERNS = exports.SKIPPED_EXACT_FILENAMES = exports.SUPPORTED_FILE_STATUSES = exports.STICKY_COMMENT_MARKER = void 0;
 exports.STICKY_COMMENT_MARKER = "<!-- ai-pr-reviewer:sticky-comment -->";
 exports.SUPPORTED_FILE_STATUSES = new Set(["added", "modified", "renamed"]);
+/**
+ * Exact filenames that are always skipped (lockfiles, generated manifests).
+ */
+exports.SKIPPED_EXACT_FILENAMES = new Set([
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "pnpm-lock.yml",
+    "npm-shrinkwrap.json",
+    "Gemfile.lock",
+    "Cargo.lock",
+    "poetry.lock",
+    "composer.lock",
+    "go.sum",
+    "go.work.sum",
+    "Pipfile.lock",
+    "bun.lockb",
+    "mix.lock",
+    "pubspec.lock",
+    "packages.lock.json",
+    "NuGet.lock.json"
+]);
+/**
+ * Path segment or filename suffix patterns that indicate generated or minified files.
+ * Tested against the full file path using RegExp.test().
+ */
+exports.SKIPPED_FILE_PATTERNS = [
+    /\.min\.(js|css|mjs|cjs)$/i,
+    /[-.]bundle\.(js|css|mjs|cjs)$/i,
+    // Vendor files (with or without a leading path segment)
+    /(^|\/)vendor\.(js|css|mjs|cjs)$/i,
+    // dist/ and build/ output directories at any depth
+    /(^|\/)dist\/[^/]+\.(js|css|mjs|cjs|map)$/i,
+    /(^|\/)build\/[^/]+\.(js|css|map)$/i,
+    // Framework build caches
+    /(^|\/)\.(next|nuxt)\//i,
+    // Protobuf / gRPC generated files
+    /\.(pb|pb\.go|_pb2\.py|_grpc\.pb\.go|pb\.gw\.go)$/i,
+    /\.generated\.(ts|js|go|py|cs|java)$/i,
+    /\.g\.cs$/i,
+    /\.designer\.cs$/i,
+    // Generated directories
+    /(^|\/)__generated__\//i,
+    /(^|\/)generated\//i,
+    /\.snap$/i,
+    /Chart\.lock$/i
+];
 
 
 /***/ }),
@@ -127,6 +174,7 @@ exports.ReviewParseError = ReviewParseError;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.GitHubClient = void 0;
 const errors_1 = __nccwpck_require__(847);
+const network_1 = __nccwpck_require__(764);
 class GitHubClient {
     token;
     fetchImpl;
@@ -158,7 +206,7 @@ class GitHubClient {
         });
     }
     async request(path, method = "GET", body) {
-        const response = await this.fetchImpl(`${this.apiBaseUrl}${path}`, {
+        const response = await (0, network_1.fetchWithRetry)(this.fetchImpl, `${this.apiBaseUrl}${path}`, {
             method,
             headers: {
                 accept: "application/vnd.github+json",
@@ -228,16 +276,120 @@ async function readPullRequestContext(eventPath, repositoryOverride) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.isOwnedComment = isOwnedComment;
 exports.upsertStickyComment = upsertStickyComment;
 const constants_1 = __nccwpck_require__(851);
+/**
+ * Returns true only when a comment was created by this action.
+ *
+ * Rules (both must be satisfied):
+ * 1. The comment body starts with the sticky marker (ignoring leading whitespace),
+ *    so an unrelated comment that merely mentions the marker string in its text body
+ *    is not treated as "owned" by this action.
+ * 2. The comment author is a GitHub Actions bot account (type "Bot" or login ending
+ *    in "[bot]"), which prevents a human who manually posts the marker from being
+ *    overwritten.
+ */
+function isOwnedComment(comment) {
+    if (!comment.body.trimStart().startsWith(constants_1.STICKY_COMMENT_MARKER)) {
+        return false;
+    }
+    const login = comment.user?.login ?? "";
+    const type = comment.user?.type ?? "";
+    return type === "Bot" || login.endsWith("[bot]");
+}
 async function upsertStickyComment(client, pullRequest, body) {
     const comments = await client.listIssueComments(pullRequest.owner, pullRequest.repo, pullRequest.number);
-    const existingComment = comments.find((comment) => comment.body.includes(constants_1.STICKY_COMMENT_MARKER));
+    const existingComment = comments.find(isOwnedComment);
     if (existingComment) {
         await client.updateIssueComment(pullRequest.owner, pullRequest.repo, existingComment.id, body);
         return;
     }
     await client.createIssueComment(pullRequest.owner, pullRequest.repo, pullRequest.number, body);
+}
+
+
+/***/ }),
+
+/***/ 764:
+/***/ ((__unused_webpack_module, exports) => {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.MAX_RETRIES = exports.REQUEST_TIMEOUT_MS = void 0;
+exports.fetchWithTimeout = fetchWithTimeout;
+exports.fetchWithRetry = fetchWithRetry;
+/**
+ * Timeout (ms) applied to every outbound HTTP request.
+ * Keeps CI from hanging on slow or unresponsive upstream services.
+ */
+exports.REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * Maximum number of additional attempts after the first failure.
+ * Total attempts = 1 + MAX_RETRIES.
+ */
+exports.MAX_RETRIES = 2;
+/**
+ * Base delay (ms) for exponential backoff between retries.
+ */
+const BASE_DELAY_MS = 500;
+/**
+ * HTTP status codes that are safe to retry (transient server-side errors).
+ */
+const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+/**
+ * Wraps fetch with a request timeout via AbortController.
+ * Throws a descriptive error when the deadline is exceeded.
+ */
+async function fetchWithTimeout(fetchImpl, input, init, timeoutMs = exports.REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+        controller.abort();
+    }, timeoutMs);
+    try {
+        return await fetchImpl(input, { ...init, signal: controller.signal });
+    }
+    catch (error) {
+        if (isAbortError(error)) {
+            throw new Error(`Request timed out after ${timeoutMs}ms: ${String(input)}`);
+        }
+        throw error;
+    }
+    finally {
+        clearTimeout(timer);
+    }
+}
+/**
+ * Calls fetchWithTimeout and retries on transient network or server errors.
+ * Throws on the final attempt failure.
+ */
+async function fetchWithRetry(fetchImpl, input, init, timeoutMs = exports.REQUEST_TIMEOUT_MS, maxRetries = exports.MAX_RETRIES) {
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        if (attempt > 0) {
+            await delay(BASE_DELAY_MS * 2 ** (attempt - 1));
+        }
+        try {
+            const response = await fetchWithTimeout(fetchImpl, input, init, timeoutMs);
+            if (attempt < maxRetries && RETRYABLE_STATUS_CODES.has(response.status)) {
+                lastError = new Error(`HTTP ${response.status}`);
+                continue;
+            }
+            return response;
+        }
+        catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError;
+}
+function delay(ms) {
+    return new Promise((resolve) => {
+        setTimeout(resolve, ms);
+    });
+}
+function isAbortError(error) {
+    return error instanceof Error && error.name === "AbortError";
 }
 
 
@@ -268,7 +420,7 @@ async function runReviewPipeline(input) {
     const chunkResults = [];
     const rawResponses = [];
     for (const chunk of prepared.chunks) {
-        const prompt = (0, prompt_1.buildReviewPrompt)(input.pullRequest, chunk, input.config.reviewInstructions);
+        const prompt = (0, prompt_1.buildReviewPrompt)(input.pullRequest, chunk, input.config.reviewInstructions, prepared.chunks.length);
         const providerResponse = await input.provider.review({
             model: input.config.model,
             systemPrompt: prompt.systemPrompt,
@@ -308,6 +460,7 @@ function createEmptyReviewRunResult() {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AnthropicProvider = void 0;
 const errors_1 = __nccwpck_require__(847);
+const network_1 = __nccwpck_require__(764);
 class AnthropicProvider {
     apiKey;
     fetchImpl;
@@ -317,7 +470,7 @@ class AnthropicProvider {
         this.fetchImpl = fetchImpl;
     }
     async review(request) {
-        const response = await this.fetchImpl("https://api.anthropic.com/v1/messages", {
+        const response = await (0, network_1.fetchWithRetry)(this.fetchImpl, "https://api.anthropic.com/v1/messages", {
             method: "POST",
             headers: {
                 "content-type": "application/json",
@@ -391,6 +544,7 @@ function createProvider(config, fetchImpl = fetch) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.OpenAiProvider = void 0;
 const errors_1 = __nccwpck_require__(847);
+const network_1 = __nccwpck_require__(764);
 class OpenAiProvider {
     apiKey;
     fetchImpl;
@@ -400,7 +554,7 @@ class OpenAiProvider {
         this.fetchImpl = fetchImpl;
     }
     async review(request) {
-        const response = await this.fetchImpl("https://api.openai.com/v1/chat/completions", {
+        const response = await (0, network_1.fetchWithRetry)(this.fetchImpl, "https://api.openai.com/v1/chat/completions", {
             method: "POST",
             headers: {
                 "content-type": "application/json",
@@ -451,9 +605,20 @@ exports.OpenAiProvider = OpenAiProvider;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.isGeneratedOrLockfile = isGeneratedOrLockfile;
 exports.prepareReviewInput = prepareReviewInput;
 exports.chunkReviewableFiles = chunkReviewableFiles;
 const constants_1 = __nccwpck_require__(851);
+/**
+ * Returns true if the file path matches a known lockfile name or generated-file pattern.
+ */
+function isGeneratedOrLockfile(filename) {
+    const basename = filename.split("/").pop() ?? filename;
+    if (constants_1.SKIPPED_EXACT_FILENAMES.has(basename)) {
+        return true;
+    }
+    return constants_1.SKIPPED_FILE_PATTERNS.some((pattern) => pattern.test(filename));
+}
 function prepareReviewInput(files, maxFiles, maxPatchChars) {
     const reviewableFiles = [];
     const skippedFiles = [];
@@ -462,6 +627,13 @@ function prepareReviewInput(files, maxFiles, maxPatchChars) {
             skippedFiles.push({
                 file: file.filename,
                 reason: "unsupported_status"
+            });
+            continue;
+        }
+        if (isGeneratedOrLockfile(file.filename)) {
+            skippedFiles.push({
+                file: file.filename,
+                reason: "generated_or_lockfile"
             });
             continue;
         }
@@ -643,14 +815,31 @@ function normalizeFinding(raw) {
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.buildReviewPrompt = buildReviewPrompt;
-function buildReviewPrompt(pullRequest, chunk, reviewInstructions) {
+/** Maximum characters of PR description forwarded to the model. */
+const MAX_PR_BODY_CHARS = 1500;
+/**
+ * Builds a prompt pair for a single review chunk.
+ *
+ * @param pullRequest - PR metadata from the GitHub event payload.
+ * @param chunk - The diff chunk to review.
+ * @param totalChunks - Total number of chunks in this PR (for context).
+ * @param reviewInstructions - Optional extra instructions from the workflow input.
+ */
+function buildReviewPrompt(pullRequest, chunk, reviewInstructions, totalChunks = 1) {
     const systemPrompt = [
         "You are a senior software engineer performing pull request review.",
-        "Focus on correctness bugs, security issues, behavior regressions, data-loss risks, concurrency hazards, and missing tests.",
-        "Ignore style-only feedback unless it directly causes a defect.",
-        "Review only the provided diff. Do not speculate about files or code that are not present in the patch.",
+        "Your only job is to find real problems. Focus exclusively on:",
+        "  • Correctness bugs and logic errors",
+        "  • Security vulnerabilities (injection, auth bypass, information disclosure, etc.)",
+        "  • Behavior regressions that could break existing functionality",
+        "  • Data-loss or data-corruption risks",
+        "  • Concurrency hazards (race conditions, improper locking)",
+        "  • Missing or inadequate test coverage for new behavior",
+        "Do NOT report style issues, naming conventions, formatting, or minor nitpicks.",
+        "Do NOT speculate about files or code that are not present in the diff.",
+        "If you find no real problems, return an empty findings array.",
         "Return strict JSON with this shape and nothing else:",
-        '{"summary":"one sentence","findings":[{"severity":"low|medium|high|critical","file":"path/to/file","title":"short finding title","explanation":"why this matters","suggested_test":"specific test to add"}]}'
+        '{"summary":"one sentence describing the most important finding or no issues found","findings":[{"severity":"low|medium|high|critical","file":"path/to/file","title":"short descriptive title","explanation":"clear explanation of why this is a real problem and what the impact is","suggested_test":"concrete test that would catch this problem if it were a bug"}]}'
     ].join("\n");
     const filesSection = chunk.files
         .map((file) => {
@@ -669,7 +858,15 @@ function buildReviewPrompt(pullRequest, chunk, reviewInstructions) {
     const extraInstructions = reviewInstructions
         ? `\nAdditional maintainer instructions:\n${reviewInstructions}\n`
         : "";
-    const prBody = pullRequest.body.trim() || "No pull request description was provided.";
+    // Trim long PR descriptions so they do not crowd out the actual diff.
+    const rawBody = pullRequest.body.trim();
+    const prBody = rawBody
+        ? rawBody.length > MAX_PR_BODY_CHARS
+            ? `${rawBody.slice(0, MAX_PR_BODY_CHARS)}\n[description truncated]`
+            : rawBody
+        : "No pull request description was provided.";
+    // Chunk context helps the model understand it may not see the full diff.
+    const chunkLabel = totalChunks > 1 ? `Chunk ${chunk.id} of ${totalChunks}` : `Chunk ${chunk.id} of 1`;
     const userPrompt = [
         `Repository: ${pullRequest.owner}/${pullRequest.repo}`,
         `Pull request: #${pullRequest.number} - ${pullRequest.title}`,
@@ -678,7 +875,7 @@ function buildReviewPrompt(pullRequest, chunk, reviewInstructions) {
         `Base branch: ${pullRequest.baseRef}`,
         `Head branch: ${pullRequest.headRef}`,
         `Forked pull request: ${pullRequest.isFork ? "yes" : "no"}`,
-        `Chunk: ${chunk.id}`,
+        chunkLabel,
         "",
         "Pull request description:",
         prBody,
@@ -686,7 +883,7 @@ function buildReviewPrompt(pullRequest, chunk, reviewInstructions) {
         "Changed files in this chunk:",
         filesSection,
         "",
-        "Return valid JSON only."
+        "Return valid JSON only. Do not wrap the JSON in markdown code fences."
     ]
         .filter(Boolean)
         .join("\n");
@@ -754,6 +951,8 @@ function formatSkippedReason(reason) {
             return "skipped because the max file limit was reached";
         case "patch_too_large":
             return "patch exceeded the configured max patch size";
+        case "generated_or_lockfile":
+            return "skipped: generated file or lockfile";
         default:
             return "skipped";
     }

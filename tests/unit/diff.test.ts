@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { prepareReviewInput } from "../../src/review/diff";
+import { isGeneratedOrLockfile, prepareReviewInput } from "../../src/review/diff";
 import type { GitHubPullRequestFile } from "../../src/types";
 
 describe("prepareReviewInput", () => {
@@ -69,5 +69,140 @@ describe("prepareReviewInput", () => {
         reason: "file_limit"
       }
     ]);
+  });
+
+  it("skips lockfiles and generated files before patch checks", () => {
+    const patch = "@@ -1 +1 @@\n-foo\n+bar\n";
+    const files: GitHubPullRequestFile[] = [
+      {
+        filename: "package-lock.json",
+        status: "modified",
+        additions: 100,
+        deletions: 50,
+        changes: 150,
+        patch
+      },
+      {
+        filename: "yarn.lock",
+        status: "modified",
+        additions: 20,
+        deletions: 10,
+        changes: 30,
+        patch
+      },
+      {
+        filename: "pnpm-lock.yaml",
+        status: "modified",
+        additions: 5,
+        deletions: 2,
+        changes: 7,
+        patch
+      },
+      {
+        filename: "dist/bundle.min.js",
+        status: "modified",
+        additions: 1,
+        deletions: 1,
+        changes: 2,
+        patch
+      },
+      {
+        filename: "src/__generated__/schema.ts",
+        status: "added",
+        additions: 50,
+        deletions: 0,
+        changes: 50,
+        patch
+      },
+      {
+        filename: "src/real.ts",
+        status: "modified",
+        additions: 3,
+        deletions: 1,
+        changes: 4,
+        patch
+      }
+    ];
+
+    const result = prepareReviewInput(files, 20, 12000);
+
+    expect(result.reviewableFiles.map((f) => f.filename)).toEqual(["src/real.ts"]);
+    expect(result.skippedFiles).toContainEqual({
+      file: "package-lock.json",
+      reason: "generated_or_lockfile"
+    });
+    expect(result.skippedFiles).toContainEqual({
+      file: "yarn.lock",
+      reason: "generated_or_lockfile"
+    });
+    expect(result.skippedFiles).toContainEqual({
+      file: "pnpm-lock.yaml",
+      reason: "generated_or_lockfile"
+    });
+    expect(result.skippedFiles).toContainEqual({
+      file: "dist/bundle.min.js",
+      reason: "generated_or_lockfile"
+    });
+    expect(result.skippedFiles).toContainEqual({
+      file: "src/__generated__/schema.ts",
+      reason: "generated_or_lockfile"
+    });
+  });
+});
+
+describe("isGeneratedOrLockfile", () => {
+  it.each([
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "pnpm-lock.yml",
+    "npm-shrinkwrap.json",
+    "Gemfile.lock",
+    "Cargo.lock",
+    "poetry.lock",
+    "composer.lock",
+    "go.sum",
+    "go.work.sum",
+    "Pipfile.lock",
+    "mix.lock",
+    "pubspec.lock",
+    "bun.lockb",
+    "packages.lock.json",
+    "NuGet.lock.json"
+  ])("detects lockfile: %s", (filename) => {
+    expect(isGeneratedOrLockfile(filename)).toBe(true);
+  });
+
+  it.each([
+    "src/app.min.js",
+    "public/style.min.css",
+    "assets/vendor.js",
+    "dist/index.js",
+    "dist/main.css",
+    "dist/chunk.map",
+    ".next/server/app.js",
+    ".nuxt/dist/client/app.js",
+    "build/output.js",
+    "src/__generated__/types.ts",
+    "lib/generated/client.ts",
+    "proto/service.pb.go",
+    "Model.g.cs",
+    "Form.designer.cs",
+    "snapshot.snap",
+    "Chart.lock"
+  ])("detects generated file: %s", (filename) => {
+    expect(isGeneratedOrLockfile(filename)).toBe(true);
+  });
+
+  it.each([
+    "src/index.ts",
+    "src/auth.ts",
+    "tests/unit/auth.test.ts",
+    "package.json",
+    "README.md",
+    "src/dist-utils.ts",
+    "src/generate-report.ts"
+  ])("does not skip normal file: %s", (filename) => {
+    expect(isGeneratedOrLockfile(filename)).toBe(false);
   });
 });
